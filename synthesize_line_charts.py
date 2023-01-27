@@ -11,6 +11,7 @@ import numpy as np
 from tqdm import tqdm
 from scipy.interpolate import interp1d
 from scipy import ndimage
+from wonderwords import RandomWord
 
 warnings.filterwarnings("ignore")
 
@@ -52,32 +53,15 @@ fontnames = [
 ]
 fontname = fontnames[0]
 
-# init words list
-conn = sqlite3.connect("./wnjpn.db")
-jpn_words_list = conn.execute(
-    "select * from word where lang = 'jpn' ORDER BY RANDOM();"
-)
-eng_words_list = conn.execute(
-    "select * from word where lang = 'eng' ORDER BY RANDOM();"
-)
-jpn_words_list = [record[2] for record in jpn_words_list.fetchall()]
-eng_words_list = [record[2] for record in eng_words_list.fetchall()]
-words_list = [jpn_words_list, eng_words_list]
-word_list = words_list[0]
-
 ax = None
 fig = None
 nlines = None
 
-
-def random_text(max_length=None):
-    word = word_list[np.random.randint(0, len(word_list))]
-    if max_length is None:
-        return word
-    while len(word) > max_length:
-        word = word_list[np.random.randint(0, len(word_list))]
-    return word
-
+# init random word generator
+rw = RandomWord()
+def random_text(max_length=4):
+    length = np.random.randint(1, max_length)
+    return " ".join([rw.word() for _ in range(length)])
 
 def random_color_table(n):
     scale = 8
@@ -108,6 +92,12 @@ def random_color_table(n):
     table = [
         (c[0] * scale / 255, c[1] * scale / 255, c[2] * scale / 255) for c in table
     ]
+    # remove (0, 255, 90) and replace with a new color not in the table if it occurs
+    if (0, 255, 90) in table:
+        if not (0, 255, 89) in table:
+            table[table.index(0, 255, 90)] = (0, 255, 89)
+        else:
+            raise ValueError("color table issues")
     return table
 
 
@@ -247,7 +237,7 @@ def init_axis_scale():
 
 
 def random_line_charts(i, output_dir):
-    global ax, fig, word_list, nlines
+    global ax, fig, nlines
     ax, fig = init_ax_fig()
 
     monotone = np.random.uniform() < 0.5
@@ -272,12 +262,8 @@ def random_line_charts(i, output_dir):
     align_xdata = np.random.uniform() < 0.6
     flat = np.random.uniform() < 0.05
 
-    # eng_word = int(np.random.uniform()<0.8)
-    eng_word = 1
-    word_list = words_list[eng_word]
-
     smooth = np.random.uniform() < 0.6  # smooth lines or not
-    add_marker = np.random.uniform() < 0.5 and align_xdata and not smooth
+    add_marker = np.random.uniform() < 0.3 and align_xdata and not smooth
     add_grid = np.random.uniform() < 0.5
     tmp = np.random.uniform()
     grid_axis = "both" if tmp < 0.2 else "y" if tmp < 0.8 else "x"
@@ -425,8 +411,8 @@ def random_line_charts(i, output_dir):
         lines.append(p)
         lines_data.append(list(zip(xdata, ydata)))
 
-    add_title = np.random.uniform() < 0.5
-    add_axis_label = np.random.uniform() < 0.5
+    add_title = np.random.uniform() < 0.8
+    add_axis_label = np.random.uniform() < 0.8
     inline_label = np.random.uniform() < 0.8 and nlines < 5
 
     aspect = np.random.uniform(0.8, 2.0)
@@ -517,9 +503,11 @@ def random_line_charts(i, output_dir):
 
     for tick in ax.get_yticklabels():
         tick.set_fontname(fontname)
-    plt.tight_layout()
 
+    plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"line{i}.png"))
+
+    line_objects = lines
 
     lines = [x[0].get_data() for x in lines]
     lines = [ax.transData.transform(np.vstack([x, y]).T) for x, y in lines]
@@ -714,6 +702,53 @@ def random_line_charts(i, output_dir):
                 break
         if not valid:
             break
+    
+    masking_color = (0, 255, 90)
+    masking_color_hex = mpl.colors.to_hex(np.array(masking_color)/255)
+    # Make image that is all masking_color for creating masks
+    masking_image = np.zeros((height, width, 3), dtype=np.uint8)
+    masking_image[:,:] = masking_color
+
+    # Generate an image of the plot
+    fig.canvas.draw()
+    masks = []
+    
+    # For each line, change its color, move it to the top z-order, and calculate the difference
+    for line in ax.get_lines():
+        color = line.get_color()
+        linestyle = line.get_linestyle()
+        marker = line.get_marker()
+        z = line.get_zorder()
+
+        # Change the color of the line
+        line.set_color(masking_color_hex)
+        line.set_linestyle('solid')
+        line.set_marker('None') # remove markers temporarily
+
+        # Move the line to the top z-order
+        line.set_zorder(100)  
+        fig.canvas.draw()
+        data_modified = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
+        data_modified = data_modified.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+        # Create a "mask" matrix of ones and zeros
+        line_mask = np.all(data_modified == masking_image, axis=2).astype(int).tolist()
+
+        line.set_marker(marker)
+        line.set_linestyle('None')
+
+        # render and marker mask
+        fig.canvas.draw()
+        data_modified = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
+        data_modified = data_modified.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        marker_mask = np.all(data_modified == masking_image, axis=2).astype(int).tolist()
+        masks.append({"line": line_mask, "marker": marker_mask})
+
+        # return plot to previous state
+        line.set_marker(marker)
+        line.set_linestyle(linestyle)
+        line.set_color(color)
+        line.set_zorder(z)
 
     chart = {
         "name": f"{i}",
@@ -830,6 +865,7 @@ def random_line_charts(i, output_dir):
                     if add_legend
                     else None,
                     "style": linestyle_indices[i],
+                    "mask": masks[i]
                 }
                 for i in range(len(lines))
             ],
